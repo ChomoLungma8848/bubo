@@ -41,6 +41,8 @@ pub struct App {
     scroll: usize,
     /// 直近に描画したファイル表示の高さ。ページ単位のスクロール量と末尾の判定に使う
     viewport_height: u16,
+    /// `g` が 1 回押され、`gg` の 2 打鍵目を待っている状態
+    pending_g: bool,
     pub should_quit: bool,
 }
 
@@ -55,18 +57,31 @@ impl App {
             rendered: None,
             scroll: 0,
             viewport_height: 0,
+            pending_g: false,
             should_quit: false,
         }
     }
 
     pub fn handle_key(&mut self, code: KeyCode) {
+        // `g` 以外のキーが来たら `gg` の待ちは捨て、そのキーは通常どおり処理する
+        let pending_g = std::mem::take(&mut self.pending_g);
         match code {
+            KeyCode::Char('g') if pending_g => self.jump_to_top(),
+            KeyCode::Char('g') => self.pending_g = true,
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
             _ => match self.focus {
                 Focus::Tree => self.handle_tree_key(code),
                 Focus::Content => self.handle_content_key(code),
             },
+        }
+    }
+
+    /// `gg`: フォーカス中のペインの先頭へ移動する
+    fn jump_to_top(&mut self) {
+        match self.focus {
+            Focus::Tree => self.selected = 0,
+            Focus::Content => self.scroll = 0,
         }
     }
 
@@ -86,6 +101,7 @@ impl App {
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Char('G') => self.selected = tree::visible(&self.tree).len().saturating_sub(1),
             KeyCode::Char(' ') => {
                 tree::toggle(&mut self.tree, self.selected);
                 let len = tree::visible(&self.tree).len();
@@ -102,6 +118,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
             KeyCode::PageDown => self.scroll_down(self.viewport_height.into()),
             KeyCode::PageUp => self.scroll_up(self.viewport_height.into()),
+            KeyCode::Char('G') => self.scroll = self.max_scroll(),
             _ => {}
         }
     }
@@ -295,6 +312,9 @@ mod tests {
             KeyCode::Char('k'),
             KeyCode::Char(' '),
             KeyCode::Enter,
+            KeyCode::Char('G'),
+            KeyCode::Char('g'),
+            KeyCode::Char('g'),
         ] {
             app.handle_key(code);
         }
@@ -505,9 +525,81 @@ mod tests {
     #[test]
     fn page_keys_on_logo_do_not_panic() {
         let (_dir, mut app) = setup();
-        for code in [KeyCode::Tab, KeyCode::PageDown, KeyCode::PageUp] {
+        for code in [
+            KeyCode::Tab,
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Char('G'),
+            KeyCode::Char('g'),
+            KeyCode::Char('g'),
+        ] {
             app.handle_key(code);
         }
         assert!(app.file_view(20, 3).is_empty());
+    }
+
+    #[test]
+    fn shift_g_and_gg_jump_file_view_to_bottom_and_top() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('G'));
+        assert_eq!(line_strings(app.file_view(20, 3)), ["line8", "", "line9"]);
+        app.handle_key(KeyCode::Char('g'));
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(line_strings(app.file_view(20, 3)), ["line0", "", "line1"]);
+    }
+
+    #[test]
+    fn shift_g_scrolls_to_max_scroll_without_redraw() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('G'));
+        assert_eq!(
+            app.scroll_metrics(),
+            Some(ScrollMetrics {
+                position: 16,
+                max_scroll: 16
+            })
+        );
+    }
+
+    #[test]
+    fn shift_g_and_gg_move_tree_cursor_to_last_and_first_item() {
+        let (_dir, mut app) = setup();
+        app.handle_key(KeyCode::Char(' '));
+        app.handle_key(KeyCode::Char('G'));
+        assert_eq!(app.selected, 2);
+        app.handle_key(KeyCode::Char('g'));
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn single_g_does_nothing_and_other_key_cancels_it() {
+        let (_dir, mut app) = setup();
+        app.handle_key(KeyCode::Char(' '));
+        app.handle_key(KeyCode::Char('G'));
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.selected, 2);
+        // g の後の k は通常の k として処理され、待ち状態も解除される
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.selected, 1);
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn tab_between_g_presses_cancels_gg() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('G'));
+        app.handle_key(KeyCode::Char('g'));
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(line_strings(app.file_view(20, 3))[0], "line8");
     }
 }
